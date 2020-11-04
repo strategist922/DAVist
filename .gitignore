@@ -1,3 +1,8 @@
+settings.json
 data.tar.gz
 VIST.tar.gz
-data/*
+data
+VIST
+.vscode
+*.pyc
+vist_eval

@@ -184,7 +184,7 @@ class Unary(nn.Module):
 
 
 class Pairwise(nn.Module):
-    def __init__(self, embed_x_size, x_spatial_dim=None, embed_y_size=None, y_spatial_dim=None):
+    def __init__(self, embed_x_size, x_spatial_dim=None, embed_y_size=None, y_spatial_dim=None, x_embed_module=None, y_embed_module=None):
         super(Pairwise, self).__init__()
         # print(x_spatial_dim, y_spatial_dim)
         embed_y_size = embed_y_size if embed_y_size is not None else embed_x_size
@@ -192,9 +192,14 @@ class Pairwise(nn.Module):
 
         self.embed_size = max(embed_x_size, embed_y_size)
         self.x_spatial_dim = x_spatial_dim
-
-        self.embed_X = nn.Conv1d(embed_x_size, self.embed_size, 1)
-        self.embed_Y = nn.Conv1d(embed_y_size, self.embed_size, 1)
+        if x_embed_module is None:
+            self.embed_X = nn.Conv1d(embed_x_size, self.embed_size, 1)
+        else:
+            self.embed_X = x_embed_module
+        if y_embed_module is None:
+            self.embed_Y = nn.Conv1d(embed_y_size, self.embed_size, 1)
+        else:
+            self.embed_Y = y_embed_module
         if x_spatial_dim is not None:
             self.normalize_S = nn.BatchNorm1d(self.x_spatial_dim * self.y_spatial_dim)
 
@@ -277,11 +282,13 @@ class FactorGraphAttention(nn.Module):
             assert len(set([self.util_e[i] for i in shared_weights])) == 1, f"shared utils are of different dimensions " \
                                                                             f"{[self.util_e[i] for i in shared_weights]}"
             if share_pairwise:
-                self.shared_pairwise = Pairwise(util_e[shared_weights[0]], None, util_e[shared_weights[0]], None)
+                self.shared_pairwise_forward = Pairwise(util_e[shared_weights[0]], None, util_e[shared_weights[0]], None)
+                self.shared_pairwise_backward = Pairwise(util_e[shared_weights[0]], None, util_e[shared_weights[0]], None)
+                # self.shared_pairwise = nn.ModuleList([nn.Conv1d(util_e[shared_weights[0]], util_e[shared_weights[0]], 1) for _ in range(len(self.shared_weights))])
             if share_self:
                 self.shared_self = Pairwise(util_e[shared_weights[0]], None)
         for ((idx1, e_dim_1), (idx2, e_dim_2)) \
-                in combinations_with_replacement(enumerate(util_e), 2):
+                in product(enumerate(util_e), repeat=2):
             if idx1 == idx2:
                 if idx1 in self.shared_weights and share_self:
                     self.pp_models[str(idx1)] = self.shared_self
@@ -294,7 +301,11 @@ class FactorGraphAttention(nn.Module):
                                 or idx2 == i and idx1 not in set(connected_list):
                             continue
                     if idx1 in self.shared_weights and idx2 in shared_weights and share_pairwise:
-                        self.pp_models[str((idx1, idx2))] = self.shared_pairwise
+                        if idx1 < idx2:
+                            self.pp_models[str((idx1, idx2))] = self.shared_pairwise_forward
+                        else:
+                            self.pp_models[str((idx1, idx2))] = self.shared_pairwise_backward
+                        # x_embed_module=self.shared_pairwise[idx1], y_embed_module=self.shared_pairwise[idx2])
                     else:
                         self.pp_models[str((idx1, idx2))] = Pairwise(e_dim_1, sizes[idx1], e_dim_2, sizes[idx2])
 
@@ -322,7 +333,7 @@ class FactorGraphAttention(nn.Module):
                     self.num_of_potentials[idx] += 1
             for k in self.num_of_potentials.keys():
                 if k not in self.high_order_set:
-                    self.num_of_potentials[k] += (self.n_utils - 1) - len(high_order_utils)
+                    self.num_of_potentials[k] += 2*(self.n_utils - 1) - len(high_order_utils)
 
         for idx in range(self.n_utils):
             self.reduce_potentials.append(nn.Conv1d(self.num_of_potentials[idx], 1, 1, bias=False))
@@ -366,7 +377,7 @@ class FactorGraphAttention(nn.Module):
 
         # joint
         if self.pairwise_flag:
-            for (i, j) in combinations_with_replacement(range(self.n_utils), 2):
+            for (i, j) in product(range(self.n_utils), repeat=2):
                 if i in self.high_order_set \
                         or j in self.high_order_set:
                     continue
