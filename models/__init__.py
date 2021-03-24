@@ -11,7 +11,6 @@ from .BaseModel import BaseModel
 import logging
 from six.moves import cPickle
 
-
 def setup(opt):
     if opt.model == 'BaseModel':
         if opt.option == 'test':

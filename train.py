@@ -101,6 +101,7 @@ def train(opt):
     dataset.train()
     model.train()
     initial_lr = opt.learning_rate
+    logging.info(model)
     ############################## training ##################################
     for epoch in range(logger.epoch_start, opt.max_epochs):
         # Assign the scheduled sampling prob

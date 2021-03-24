@@ -23,13 +23,14 @@ class TensorBoard:
         if opt.option != 'train' or opt.no_tb:
             logging.info(f"No tensorboard in this mode.")
             self.writer = None
-        try:
-            from torch.utils.tensorboard import SummaryWriter
-            self.writer = SummaryWriter(log_dir=self.dir, comment=f' opt.id')
-            logging.info(f'logging to tensorboard at {self.dir}')
-        except ImportError:
-            logging.info("Tensorflow not installed; No tensorboard logging.")
-            self.writer = None
+        else:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+                self.writer = SummaryWriter(log_dir=self.dir, comment=f' opt.id')
+                logging.info(f'logging to tensorboard at {self.dir}')
+            except ImportError:
+                logging.info("Tensorflow not installed; No tensorboard logging.")
+                self.writer = None
 
 
 class Logger:

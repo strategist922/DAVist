@@ -22,6 +22,7 @@ class BaseModel(nn.Module):
         self.word_embed_dim = opt.word_embed_dim
         self.hidden_dim = opt.hidden_dim
         self.num_layers = opt.num_layers
+        self.num_layers_decoder = opt.num_layers_decoder
         self.rnn_type = opt.rnn_type
         self.dropout = opt.dropout
         self.seq_length = opt.seq_length
@@ -32,14 +33,15 @@ class BaseModel(nn.Module):
         # Visual Encoder
         self.encoder = VisualEncoder(opt)
 
+
         # Decoder LSTM
         self.project_d = nn.Linear(self.decoder_input_dim, self.word_embed_dim)
         if self.rnn_type == 'gru':
             self.decoder = nn.GRU(input_size=self.word_embed_dim, hidden_size=self.hidden_dim, batch_first=True,
-                                  num_layers=opt.num_layers)
+                                  num_layers=self.num_layers_decoder)
         elif self.rnn_type == 'lstm':
             self.decoder = nn.LSTM(input_size=self.word_embed_dim, hidden_size=self.hidden_dim, batch_first=True,
-                                   num_layers=opt.num_layers)
+                                   num_layers=self.num_layers_decoder)
         else:
             raise Exception("RNN type is not supported: {}".format(self.rnn_type))
 
@@ -48,17 +50,17 @@ class BaseModel(nn.Module):
                                    nn.Tanh(),
                                    nn.Dropout(p=self.dropout),
                                    nn.Linear(self.hidden_dim // 2, self.vocab_size))
-        self.init_s_proj = nn.Linear(self.feat_size, self.hidden_dim)
-        self.init_c_proj = nn.Linear(self.feat_size, self.hidden_dim)
+        self.init_s_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.init_c_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
 
-        self.project_d_gate = nn.Linear(self.hidden_dim, 32)
-        self.project_h_gate = nn.Linear(32, 32)
-        self.gate = nn.Linear(32, 1)
+        # self.project_d_gate = nn.Linear(self.hidden_dim, 32)
+        # self.project_h_gate = nn.Linear(32, 32)
+        # self.gate = nn.Linear(32, 1)
 
-        self.count_prior_h = nn.Sequential(nn.Linear(self.vocab_size, 32),
-                                         nn.Dropout(0.1))
-        self.count_prior = nn.Sequential(nn.Linear(32, self.vocab_size),
-                                         nn.ReLU())
+        # self.count_prior_h = nn.Sequential(nn.Linear(self.vocab_size, 32),
+        #                                  nn.Dropout(0.1))
+        # self.count_prior = nn.Sequential(nn.Linear(32, self.vocab_size),
+        #                                  nn.ReLU())
 
         for m in self.parameters():
             weight_init(m)
@@ -85,10 +87,10 @@ class BaseModel(nn.Module):
         weight = next(self.parameters()).data
         times = 2 if bi else 1
         if self.rnn_type == 'gru':
-            return weight.new(self.num_layers * times, batch_size, dim).zero_()
+            return weight.new(self.num_layers_decoder * times, batch_size, dim).zero_()
         else:
-            return (weight.new(self.num_layers * times, batch_size, dim).zero_(),
-                    weight.new(self.num_layers * times, batch_size, dim).zero_())
+            return (weight.new(self.num_layers_decoder * times, batch_size, dim).zero_(),
+                    weight.new(self.num_layers_decoder * times, batch_size, dim).zero_())
 
     def init_hidden_with_feature(self, feature):
         if self.rnn_type == 'gru':
@@ -100,7 +102,8 @@ class BaseModel(nn.Module):
             return (output1.view(1, -1, output1.size(-1)).expand(self.num_layers, -1, output1.size(-1)).contiguous(), \
                     output2.view(1, -1, output2.size(-1)).expand(self.num_layers, -1, output2.size(-1)).contiguous())
 
-    def decode(self, imgs, last_word, state_d, history_count, penalize_previous=False):
+
+    def decode(self, imgs, last_word, state_d, history_count=None, penalize_previous=False):
         # 'last_word' is Variable contraining a word index
         # batch_size * input_encoding_size
         word_emb = self.embed(last_word)
@@ -109,15 +112,9 @@ class BaseModel(nn.Module):
         input_d = torch.cat([word_emb, imgs.unsqueeze(1)], 2)  # batch_size * 1 * dim
         input_d = self.project_d(input_d)
 
-        history_count = F.normalize(history_count, dim=1)
-        history_count = self.count_prior_h(history_count)
-
-        gate = torch.sigmoid(self.gate(torch.tanh(self.project_d_gate(state_d).squeeze(0) + self.project_h_gate(history_count))))
-
         out_d, state_d = self.decoder(input_d, state_d)
 
-        log_probs = F.log_softmax(gate * self.count_prior(history_count) + (1-gate) * self.logit(out_d.squeeze(1)),
-                                  dim=1)
+        log_probs = F.log_softmax(self.logit(out_d[:, 0, :]))
 
         if penalize_previous:
             last_word_onehot = torch.FloatTensor(last_word.size(0), self.vocab_size).zero_().cuda()
@@ -140,6 +137,10 @@ class BaseModel(nn.Module):
         # encode the visual features
         out_e, _ = self.encoder(features_fc, features_obj, spatial=spatial, clss=clss, attrs=attrs)
 
+        # initialize decoder's state
+        # state_d = self.init_hidden(batch_size, bi=False, dim=self.hidden_dim)
+        state_d = self.init_hidden_with_feature(out_e)
+
         # reshape the inputs, making the sentence generation separately
         out_e = out_e.view(-1, out_e.size(2))
         caption = caption.view(-1, caption.size(2))
@@ -147,17 +148,14 @@ class BaseModel(nn.Module):
         ############################# decoding stage ##############################
         batch_size = out_e.size(0)
 
-        # initialize decoder's state
-        # state_d = self.init_hidden(batch_size, bi=False, dim=self.hidden_dim)
-        state_d = self.init_hidden_with_feature(features_fc)
 
         last_word = torch.FloatTensor(batch_size).long().zero_().cuda()
         outputs = []
-        history_count_numpy = history_count.view(-1, self.vocab_size).cpu().numpy()
-        if frequencies is not None:
-            history_count_numpy = np.maximum(history_count_numpy - frequencies + 1, np.zeros_like(history_count_numpy))
+        # history_count_numpy = history_count.view(-1, self.vocab_size).cpu().numpy()
+        # if frequencies is not None:
+        #     history_count_numpy = np.maximum(history_count_numpy - frequencies + 1, np.zeros_like(history_count_numpy))
         for i in range(self.seq_length):
-            log_probs, state_d = self.decode(out_e, last_word, state_d, torch.from_numpy(history_count_numpy).cuda())
+            log_probs, state_d = self.decode(out_e, last_word, state_d)
             outputs.append(log_probs)
 
             # choose the word
@@ -173,12 +171,11 @@ class BaseModel(nn.Module):
                     prob_prev = torch.exp(log_probs.data)
                     last_word.index_copy_(0, sample_ind,
                                           torch.multinomial(prob_prev, 1).view(-1).index_select(0, sample_ind))
-                    # last_word = Variable(last_word)last_wordΩ
+                    last_word = Variable(last_word)
             else:
                 last_word = caption[:, i].clone()
 
             # break condition
-            history_count_numpy[range(history_count_numpy.shape[0]),  last_word.cpu()] += 1
             if i >= 1 and caption[:, i].data.sum() == 0:
                 break
 
@@ -197,10 +194,10 @@ class BaseModel(nn.Module):
 
         seqs = []
         seqs_log_probs = []
-        counter = np.zeros((batch_size, self.vocab_size), 'float32')
+        # counter = np.zeros((batch_size, self.vocab_size), 'float32')
         baselines = []
         for i in range(self.story_size):
-            state_d = self.init_hidden_with_feature(features_fc[:, i, :].unsqueeze(1))
+            state_d = self.init_hidden_with_feature(out_e[:, i, :].unsqueeze(1))
             out_e_i = out_e[:, i, :]
             seq = []
             seq_log_probs = []
@@ -209,7 +206,7 @@ class BaseModel(nn.Module):
 
             last_word = torch.FloatTensor(batch_size).long().zero_().cuda()
             for t in range(self.seq_length):
-                log_probs, state_d = self.decode(out_e_i, last_word, state_d, torch.from_numpy(counter).cuda(),
+                log_probs, state_d = self.decode(out_e_i, last_word, state_d, None,
                                                  True)
                 log_probs[:, 1] = log_probs[:, 1] - 1000
                 if t < 6:
@@ -220,7 +217,7 @@ class BaseModel(nn.Module):
                 if sample_max:
                     if penalty > 0:
                         sample_log_prob = torch.exp(log_probs.data)
-                        curr_counter = counter.copy()
+                        # curr_counter = counter.copy()
                         if frequencies is not None:
                             curr_counter = np.maximum(curr_counter - frequencies + 1, np.zeros_like(curr_counter))
                         sample_log_prob = sample_log_prob/(penalty*torch.from_numpy(curr_counter).cuda() + 1)
@@ -238,8 +235,8 @@ class BaseModel(nn.Module):
                     sample_log_prob = log_probs.gather(1, last_word)
                     # flatten indices for downstream processing
                     last_word = last_word.view(-1).long()
-                counter[range(counter.shape[0]), last_word.cpu().numpy()] += 1
-                counter[:, function_words] = 0
+                # counter[range(counter.shape[0]), last_word.cpu().numpy()] += 1
+                # counter[:, function_words] = 0
 
                 if t == 0:
                     unfinished = last_word > 0
@@ -297,10 +294,10 @@ class BaseModel(nn.Module):
         for j in range(self.story_size):
             seq = torch.LongTensor(self.seq_length, batch_size).zero_()
             seq_log_probs = torch.FloatTensor(self.seq_length, batch_size)
-            state_d = self.init_hidden_with_feature(features_fc[:, j, :].unsqueeze(1))
+            state_d = self.init_hidden_with_feature(out_e[:, j, :].unsqueeze(1))
             out_e_j = out_e[:, j, :]
             for k in range(batch_size):
-                curr_counter = np.zeros((beam_size, self.vocab_size), 'float32')
+                # curr_counter = np.zeros((beam_size, self.vocab_size), 'float32')
                 out_e_k = out_e_j[k].unsqueeze(0).expand(beam_size, out_e_j.size(1))
                 if self.rnn_type != 'lstm':
                     state_d_k = state_d[:, k, :].unsqueeze(1).expand(state_d.size(0), beam_size,
@@ -311,7 +308,7 @@ class BaseModel(nn.Module):
                          for state_di in state_d])
                 last_word = torch.FloatTensor(beam_size).long().zero_().cuda()  # <BOS>
 
-                log_probs, state_d_k = self.decode(out_e_k, last_word, state_d_k, torch.from_numpy(curr_counter).cuda(),
+                log_probs, state_d_k = self.decode(out_e_k, last_word, state_d_k, None,
                                                    True)
                 log_probs[:, 1] = log_probs[:, 1] - 1000  # never produce <UNK> token
 
@@ -337,7 +334,7 @@ class BaseModel(nn.Module):
                     all_outputs = all_outputs[:, indexes]
                     all_masks = all_masks[:, indexes]
                     all_costs = all_costs[:, indexes]
-                    curr_counter = curr_counter[indexes, :]
+                    # curr_counter = curr_counter[indexes, :]
 
 
                     last_word = torch.from_numpy(outputs).cuda()
@@ -346,8 +343,7 @@ class BaseModel(nn.Module):
                     else:
                         state_d_k = tuple([torch.from_numpy(new_state_di).cuda() for new_state_di in new_state_d])
 
-                    log_probs, state_d_k = self.decode(out_e_k, last_word, state_d_k, torch.from_numpy(curr_counter).cuda(),
-                                                       True)
+                    log_probs, state_d_k = self.decode(out_e_k, last_word, state_d_k, None, True)
 
                     log_probs[:, 1] = log_probs[:, 1] - 1000
                     if penalty > 0:
@@ -367,8 +363,8 @@ class BaseModel(nn.Module):
                     all_costs = np.vstack([all_costs, chosen_costs[None, :]])
                     mask = outputs != 0
                     all_masks = np.vstack([all_masks, mask[None, :]])
-                    curr_counter = create_occurance_matrix(all_outputs.T, self.vocab_size)
-                    curr_counter[:, function_words] = 0
+                    # curr_counter = create_occurance_matrix(all_outputs.T, self.vocab_size)
+                    # curr_counter[:, function_words] = 0
 
                 all_outputs = all_outputs[1:]
                 all_costs = all_costs[1:] - all_costs[:-1]
@@ -379,7 +375,7 @@ class BaseModel(nn.Module):
                 best_idx = np.argmin(normalized_cost)
                 seq[:all_outputs.shape[0], k] = torch.from_numpy(all_outputs[:, best_idx])
                 seq_log_probs[:all_costs.shape[0], k] = torch.from_numpy(all_costs[:, best_idx])
-                counter[k] += curr_counter[best_idx]
+                # counter[k] += curr_counter[best_idx]
 
             # return the samples and their log likelihoods
             seq = seq.transpose(0, 1)

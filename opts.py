@@ -134,7 +134,7 @@ def parse_opt():
                         help='every how many epochs to increase scheduled sampling probability')
     parser.add_argument('--scheduled_sampling_increase_prob', type=float, default=0.05,
                         help='How much to update the prob')
-    parser.add_argument('--scheduled_sampling_max_prob', type=float, default=0.25,
+    parser.add_argument('--scheduled_sampling_max_prob', type=float, default=0.3,
                         help='Maximum scheduled sampling prob.')
 
     # Evaluation/Checkpointing

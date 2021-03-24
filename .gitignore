@@ -6,3 +6,6 @@ VIST
 .vscode
 *.pyc
 vist_eval
+.history
+uploaded_images.txt
+VideoStorytelling/create_segments.py
